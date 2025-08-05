@@ -2,11 +2,13 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.hilt.android)
+    id("com.google.devtools.ksp") version "2.0.0-1.0.23"
 }
 
 android {
     namespace = "com.ajaytechsolutions.goalr"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.ajaytechsolutions.goalr"
@@ -50,6 +52,31 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.androidx.runtime.livedata)
+
+    // Room Database
+    implementation(libs.androidx.room.runtime)
+    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.room.ktx)
+
+    // Lifecycle + ViewModel
+    implementation(libs.androidx.lifecycle.runtime.ktx.v270)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
+
+    // Navigation Compose
+    implementation(libs.androidx.navigation.compose)
+
+    //Hilt Dependency Injection
+    implementation(libs.hilt.android)
+    ksp(libs.hilt.compiler)
+    implementation(libs.hilt.navigation.compose)
+
+
+    // WorkManager (Kotlin + Coroutines)
+    implementation(libs.androidx.work.runtime.ktx)
+
+    implementation ("com.google.android.material:material:+")
+    implementation(libs.androidx.material.icons.extended)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
