@@ -43,19 +43,12 @@ fun HomeScreen(
     permissionStates: PermissionStates,
     onRequestActivityPermission: () -> Unit,
     onRequestNotificationPermission: () -> Unit,
-    onOpenAppSettings: () -> Unit
+    onRequestBatteryOptimization: () -> Unit,
+    onOpenAppSettings: () -> Unit,
+    onOpenBatterySettings: () -> Unit
 ) {
     val context = LocalContext.current
     val activity = context as ComponentActivity
-
-    // Show permission dialogs if needed
-    PermissionDialogs(
-        permissionStates = permissionStates,
-        activity = activity,
-        onRequestActivityPermission = onRequestActivityPermission,
-        onRequestNotificationPermission = onRequestNotificationPermission,
-        onOpenAppSettings = onOpenAppSettings
-    )
 
     val stepsToday by viewModel.currentSteps.collectAsState()
     val user by viewModel.user.collectAsState()
@@ -140,8 +133,29 @@ fun HomeScreen(
             // Permission warning banner (if needed)
             if (!permissionStates.activityRecognitionGranted) {
                 PermissionWarningBanner(
+                    title = "Activity Tracking",
+                    description = "Permission needed for step counting",
                     onRequestPermission = onRequestActivityPermission,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+
+            if (!permissionStates.notificationGranted) {
+                PermissionWarningBanner(
+                    title = "Notifications",
+                    description = "Enable notifications for goal updates",
+                    onRequestPermission = onRequestNotificationPermission,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            }
+
+            if (!permissionStates.batteryOptimizationDisabled) {
+                PermissionWarningBanner(
+                    title = "Battery Optimization",
+                    description = "Disable for accurate background tracking",
+                    onRequestPermission = onRequestBatteryOptimization,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    color = Color(0xFF4CAF50)
                 )
             }
 
@@ -374,15 +388,18 @@ fun HomeScreen(
 
 @Composable
 private fun PermissionWarningBanner(
+    title: String,
+    description: String,
     onRequestPermission: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    color: Color = Color(0xFFFF6B35)
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFFF6B35).copy(alpha = 0.1f)
+            containerColor = color.copy(alpha = 0.1f)
         ),
-        border = BorderStroke(1.dp, Color(0xFFFF6B35).copy(alpha = 0.3f))
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f))
     ) {
         Row(
             modifier = Modifier
@@ -398,22 +415,30 @@ private fun PermissionWarningBanner(
                 Icon(
                     imageVector = Icons.Default.Warning,
                     contentDescription = "Warning",
-                    tint = Color(0xFFFF6B35),
+                    tint = color,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "Activity tracking permission needed",
-                    color = Color(0xFFFF6B35),
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
+                Column {
+                    Text(
+                        text = title,
+                        color = color,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = description,
+                        color = color.copy(alpha = 0.8f),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Normal
+                    )
+                }
             }
 
             TextButton(
                 onClick = onRequestPermission,
                 colors = ButtonDefaults.textButtonColors(
-                    contentColor = Color(0xFFFF6B35)
+                    contentColor = color
                 )
             ) {
                 Text(
@@ -539,192 +564,6 @@ private fun HomeActionButton(
             color = Color.White.copy(alpha = 0.8f)
         )
     }
-}
-
-@Composable
-private fun PermissionDialogs(
-    permissionStates: PermissionStates,
-    activity: ComponentActivity,
-    onRequestActivityPermission: () -> Unit,
-    onRequestNotificationPermission: () -> Unit,
-    onOpenAppSettings: () -> Unit
-) {
-    var showActivityPermissionRationale by remember { mutableStateOf(false) }
-    var showNotificationPermissionRationale by remember { mutableStateOf(false) }
-    var showActivityPermissionSettingsDialog by remember { mutableStateOf(false) }
-    var showNotificationPermissionSettingsDialog by remember { mutableStateOf(false) }
-
-    // Check for permission denial states
-    LaunchedEffect(permissionStates) {
-        // Activity recognition permission handling
-        if (permissionStates.activityRecognitionAsked && !permissionStates.activityRecognitionGranted) {
-            val shouldShowRationale = activity.shouldShowActivityRationale()
-            if (shouldShowRationale) {
-                showActivityPermissionRationale = true
-            } else {
-                showActivityPermissionSettingsDialog = true
-            }
-        }
-
-        // Notification permission handling
-        if (permissionStates.notificationAsked && !permissionStates.notificationGranted) {
-            val shouldShowRationale = activity.shouldShowNotificationRationale()
-            if (shouldShowRationale) {
-                showNotificationPermissionRationale = true
-            } else {
-                showNotificationPermissionSettingsDialog = true
-            }
-        }
-    }
-
-    // Rationale dialogs
-    if (showActivityPermissionRationale) {
-        AlertDialog(
-            onDismissRequest = { showActivityPermissionRationale = false },
-            title = {
-                Text(
-                    "Activity Recognition Permission Needed",
-                    color = Color.White
-                )
-            },
-            text = {
-                Text(
-                    "This app needs access to activity recognition to count your steps accurately.",
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showActivityPermissionRationale = false
-                    onRequestActivityPermission()
-                }) {
-                    Text("Grant Permission")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showActivityPermissionRationale = false }) {
-                    Text("Cancel")
-                }
-            },
-            containerColor = Color(0xFF1A1A1A)
-        )
-    }
-
-    if (showNotificationPermissionRationale) {
-        AlertDialog(
-            onDismissRequest = { showNotificationPermissionRationale = false },
-            title = {
-                Text(
-                    "Notification Permission Needed",
-                    color = Color.White
-                )
-            },
-            text = {
-                Text(
-                    "This app needs permission to send notifications about your progress.",
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showNotificationPermissionRationale = false
-                    onRequestNotificationPermission()
-                }) {
-                    Text("Grant Permission")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showNotificationPermissionRationale = false }) {
-                    Text("Cancel")
-                }
-            },
-            containerColor = Color(0xFF1A1A1A)
-        )
-    }
-
-    // Settings dialogs for permanently denied permissions
-    if (showActivityPermissionSettingsDialog) {
-        AlertDialog(
-            onDismissRequest = { showActivityPermissionSettingsDialog = false },
-            title = {
-                Text(
-                    "Activity Recognition Permission Required",
-                    color = Color.White
-                )
-            },
-            text = {
-                Text(
-                    "Step tracking requires activity recognition permission. Please enable it in app settings.",
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showActivityPermissionSettingsDialog = false
-                    onOpenAppSettings()
-                }) {
-                    Text("Open Settings")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showActivityPermissionSettingsDialog = false }) {
-                    Text("Cancel")
-                }
-            },
-            containerColor = Color(0xFF1A1A1A)
-        )
-    }
-
-    if (showNotificationPermissionSettingsDialog) {
-        AlertDialog(
-            onDismissRequest = { showNotificationPermissionSettingsDialog = false },
-            title = {
-                Text(
-                    "Notification Permission Denied",
-                    color = Color.White
-                )
-            },
-            text = {
-                Text(
-                    "To receive progress notifications, please enable notification permission in app settings.",
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showNotificationPermissionSettingsDialog = false
-                    onOpenAppSettings()
-                }) {
-                    Text("Open Settings")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showNotificationPermissionSettingsDialog = false }) {
-                    Text("Cancel")
-                }
-            },
-            containerColor = Color(0xFF1A1A1A)
-        )
-    }
-}
-
-// Extension functions to access MainActivity methods
-private fun ComponentActivity.shouldShowActivityRationale(): Boolean {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        ActivityCompat.shouldShowRequestPermissionRationale(
-            this,
-            android.Manifest.permission.ACTIVITY_RECOGNITION
-        )
-    } else false
-}
-
-private fun ComponentActivity.shouldShowNotificationRationale(): Boolean {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ActivityCompat.shouldShowRequestPermissionRationale(
-            this,
-            android.Manifest.permission.POST_NOTIFICATIONS
-        )
-    } else false
 }
 
 // Helper functions

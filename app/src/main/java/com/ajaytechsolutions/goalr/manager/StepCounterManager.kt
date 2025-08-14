@@ -5,450 +5,283 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.time.LocalDate
-import kotlin.math.abs
+import java.time.format.DateTimeFormatter
 import kotlin.math.sqrt
 
-class StepCounterManager(context: Context) : SensorEventListener {
+/**
+ * Simplified step counting manager using device-native step sensors with minimal fallback.
+ * Uses Room database for persistence and handles device reboots by starting with saved steps.
+ *
+ * Key features:
+ * - Prioritizes Sensor.TYPE_STEP_DETECTOR for accurate step detection
+ * - Falls back to Sensor.TYPE_STEP_COUNTER with reboot handling
+ * - Basic accelerometer fallback for devices without step sensors
+ * - Initializes daily steps from Room database
+ * - Handles device reboots to maintain step count continuity
+ *
+ * @param context Android application context
+ */
+class StepCounterManager(private val context: Context) : SensorEventListener {
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
-    // Hardware step sensor (preferred)
+    // Sensors prioritized by accuracy
     private val stepDetectorSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
-
-    // REQUIRED validation sensors for anti-cheating
+    private val stepCounterSensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
     private val accelerometer: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    private val gravitySensor: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
-    private val gyroscope: Sensor? = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
-    private var currentSteps = 0
+    // Step counting state
+    private var dailySteps = 0
+    private var sessionStartSteps = 0
+    private var lastKnownHardwareCount = 0L
     private var currentDate: LocalDate = LocalDate.now()
+    private var isActive = false
 
-    // Detection mode
-    private var usingStepDetector = false
-    private var usingAccelerometer = false
-
-    // Ultra-strict validation variables
+    // Basic accelerometer detection variables
+    private val accelBuffer = mutableListOf<Float>()
     private var lastStepTime = 0L
-    private var lastMagnitude = 0.0
-    private val stepThreshold = 2.0f
-    private val minStepInterval = 400L // Stricter minimum
-    private val maxStepInterval = 2000L
 
-    // Advanced anti-cheating detection
-    private val recentStepTimes = mutableListOf<Long>()
-    private val maxRecentSteps = 6
-    private var consecutiveRapidSteps = 0
-    private var suspiciousPatternCount = 0
+    // Detection parameters
+    private val STEP_THRESHOLD = 10.0f // Simple threshold for accelerometer
+    private val MIN_STEP_INTERVAL = 250L // Minimum time between steps (ms)
+    private val BUFFER_SIZE = 20 // Size of accelerometer buffer
 
-    // Multi-sensor validation
-    private var lastGravity = floatArrayOf(0f, 0f, 9.81f)
-    private var lastAcceleration = floatArrayOf(0f, 0f, 0f)
-    private var lastGyroscope = floatArrayOf(0f, 0f, 0f)
-    private var lastGravityTime = 0L
-    private var lastAccelTime = 0L
-    private var lastGyroTime = 0L
-
-    // Sophisticated pattern analysis
-    private var deviceVerticalStability = 0.0
-    private val stabilityWindow = mutableListOf<Double>()
-    private val rotationWindow = mutableListOf<Double>()
-    private val verticalAccelWindow = mutableListOf<Double>()
-
-    // Walking confidence scoring
-    private var walkingConfidence = 0.0
-    private var stationaryTime = 0L
-    private var lastSignificantMovement = 0L
-
+    // Public state flows
     private val _stepsToday = MutableStateFlow(0)
     val stepsToday = _stepsToday.asStateFlow()
 
-    fun startTracking(initialSteps: Int = 0) {
-        currentSteps = initialSteps
-        resetValidationVariables()
-        startSensorListening()
-        _stepsToday.value = currentSteps
-        android.util.Log.d("StepCounter", "Ultra-strict tracking started with initial steps: $initialSteps")
-    }
+    private val _isTracking = MutableStateFlow(false)
+    val isTracking = _isTracking.asStateFlow()
 
-    fun startTrackingAfterReboot(initialSteps: Int = 0) {
-        currentSteps = initialSteps
-        resetValidationVariables()
-        startSensorListening()
-        _stepsToday.value = currentSteps
-        android.util.Log.d("StepCounter", "Ultra-strict tracking started after reboot with initial steps: $initialSteps")
-    }
+    private val handler = Handler(Looper.getMainLooper())
 
-    private fun resetValidationVariables() {
-        lastStepTime = 0L
-        lastMagnitude = 0.0
-        recentStepTimes.clear()
-        consecutiveRapidSteps = 0
-        suspiciousPatternCount = 0
-        lastGravity = floatArrayOf(0f, 0f, 9.81f)
-        lastAcceleration = floatArrayOf(0f, 0f, 0f)
-        lastGyroscope = floatArrayOf(0f, 0f, 0f)
-        lastGravityTime = 0L
-        lastAccelTime = 0L
-        lastGyroTime = 0L
-        deviceVerticalStability = 0.0
-        stabilityWindow.clear()
-        rotationWindow.clear()
-        verticalAccelWindow.clear()
-        walkingConfidence = 0.0
-        stationaryTime = 0L
-        lastSignificantMovement = 0L
-    }
-
-    private fun startSensorListening() {
-        if (stepDetectorSensor != null && accelerometer != null && gravitySensor != null) {
-            usingStepDetector = true
-            usingAccelerometer = false
-
-            sensorManager.registerListener(this, stepDetectorSensor, SensorManager.SENSOR_DELAY_FASTEST)
-            sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)
-            sensorManager.registerListener(this, gravitySensor, SensorManager.SENSOR_DELAY_GAME)
-            gyroscope?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-            }
-
-            android.util.Log.d("StepCounter", "Using STEP_DETECTOR with ULTRA-STRICT multi-sensor validation")
-        } else if (accelerometer != null && gravitySensor != null) {
-            usingStepDetector = false
-            usingAccelerometer = true
-
-            sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_GAME)
-            sensorManager.registerListener(this, gravitySensor, SensorManager.SENSOR_DELAY_GAME)
-            gyroscope?.let {
-                sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
-            }
-
-            android.util.Log.d("StepCounter", "Using accelerometer with ultra-strict validation")
-        } else {
-            android.util.Log.e("StepCounter", "Required sensors not available - cannot prevent cheating!")
+    /**
+     * Starts step tracking with an initial step count from the database
+     * @param initialSteps Steps loaded from the Room database for the current day
+     */
+    fun startTracking(initialSteps: Int) {
+        if (isActive) {
+            android.util.Log.d("StepCounter", "Already tracking, ignoring start request")
+            return
         }
+
+        isActive = true
+        dailySteps = initialSteps // Initialize with database steps
+        checkDateRollover()
+
+        // Register sensors in order of preference
+        when {
+            stepDetectorSensor != null -> {
+                sensorManager.registerListener(this, stepDetectorSensor, SensorManager.SENSOR_DELAY_NORMAL)
+                android.util.Log.i("StepCounter", "Using hardware step detector")
+            }
+            stepCounterSensor != null -> {
+                sensorManager.registerListener(this, stepCounterSensor, SensorManager.SENSOR_DELAY_NORMAL)
+                initializeHardwareStepCounter()
+                android.util.Log.i("StepCounter", "Using hardware step counter")
+            }
+            accelerometer != null -> {
+                sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
+                android.util.Log.i("StepCounter", "Using accelerometer-based detection")
+            }
+            else -> {
+                android.util.Log.w("StepCounter", "No suitable sensors available")
+                return
+            }
+        }
+
+        sessionStartSteps = dailySteps
+        _isTracking.value = true
+        _stepsToday.value = dailySteps
+
+        android.util.Log.i("StepCounter", "Step tracking started - Initial steps: $dailySteps")
     }
 
-    fun stopTracking() {
-        sensorManager.unregisterListener(this)
-        android.util.Log.d("StepCounter", "Ultra-strict tracking stopped")
+    /**
+     * Initialize hardware step counter baseline
+     */
+    private fun initializeHardwareStepCounter() {
+        stepCounterSensor?.let { sensor ->
+            sensorManager.registerListener(object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent?) {
+                    event?.let {
+                        lastKnownHardwareCount = it.values[0].toLong()
+                        sensorManager.unregisterListener(this)
+                        android.util.Log.d("StepCounter", "Hardware baseline set: $lastKnownHardwareCount")
+                    }
+                }
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            }, sensor, SensorManager.SENSOR_DELAY_FASTEST)
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent?) {
-        when (event?.sensor?.type) {
+        if (!isActive || event == null) return
+
+        when (event.sensor.type) {
             Sensor.TYPE_STEP_DETECTOR -> handleStepDetector(event)
-            Sensor.TYPE_ACCELEROMETER -> handleAccelerometer(event)
-            Sensor.TYPE_GRAVITY -> handleGravity(event)
-            Sensor.TYPE_GYROSCOPE -> handleGyroscope(event)
+            Sensor.TYPE_STEP_COUNTER -> handleStepCounter(event)
+            Sensor.TYPE_ACCELEROMETER -> handleAccelerometerData(event)
         }
+
+        checkDateRollover()
     }
 
-    private fun handleGravity(event: SensorEvent) {
-        lastGravity = event.values.clone()
-        lastGravityTime = System.currentTimeMillis()
-        updateDeviceStability()
-    }
-
-    private fun handleGyroscope(event: SensorEvent) {
-        lastGyroscope = event.values.clone()
-        lastGyroTime = System.currentTimeMillis()
-        updateRotationAnalysis()
-    }
-
+    /**
+     * Handle step detector sensor (most accurate)
+     */
     private fun handleStepDetector(event: SensorEvent) {
-        val today = LocalDate.now()
-        if (today != currentDate) {
-            handleDateChange(today)
-            return
-        }
+        val steps = event.values[0].toInt() // Each event represents one step
+        val currentTime = System.currentTimeMillis()
 
-        val now = System.currentTimeMillis()
-        val timeSinceLastStep = now - lastStepTime
-
-        // Basic rapid-fire filter
-        if (timeSinceLastStep < 250L && lastStepTime > 0) {
-            android.util.Log.d("StepCounter", "Filtered rapid step event: ${timeSinceLastStep}ms")
-            return
-        }
-
-        // ULTRA-STRICT validation - must pass ALL checks
-        val validationResult = performUltraStrictValidation(now, timeSinceLastStep)
-        if (!validationResult.isValid) {
-            android.util.Log.d("StepCounter", "REJECTED: ${validationResult.reason}")
-            suspiciousPatternCount++
-
-            // If too many rejections, increase scrutiny
-            if (suspiciousPatternCount > 5) {
-                android.util.Log.w("StepCounter", "High suspicious activity detected - increasing validation strictness")
+        if (currentTime - lastStepTime >= MIN_STEP_INTERVAL) {
+            repeat(steps) {
+                registerStep(currentTime)
             }
-            return
         }
-
-        // Step accepted - update confidence and counters
-        currentSteps++
-        _stepsToday.value = currentSteps
-        lastStepTime = now
-        lastSignificantMovement = now
-
-        recentStepTimes.add(now)
-        if (recentStepTimes.size > maxRecentSteps) {
-            recentStepTimes.removeAt(0)
-        }
-
-        consecutiveRapidSteps = 0
-        walkingConfidence = minOf(1.0, walkingConfidence + 0.2)
-
-        // Reduce suspicion on valid steps
-        suspiciousPatternCount = maxOf(0, suspiciousPatternCount - 1)
-
-        android.util.Log.d("StepCounter", "VALID STEP: $currentSteps (confidence: $walkingConfidence, interval: ${timeSinceLastStep}ms)")
     }
 
-    private fun handleAccelerometer(event: SensorEvent) {
-        lastAcceleration = event.values.clone()
-        lastAccelTime = System.currentTimeMillis()
-        updateVerticalAccelAnalysis()
-        updateMovementDetection()
+    /**
+     * Handle hardware step counter (cumulative since boot)
+     */
+    private fun handleStepCounter(event: SensorEvent) {
+        val currentHardwareCount = event.values[0].toLong()
 
-        // Only used as fallback when no hardware step detector is available
-        if (usingStepDetector) return
-
-        val today = LocalDate.now()
-        if (today != currentDate) {
-            handleDateChange(today)
-            return
+        // Detect reboot (hardware count resets to a lower value)
+        if (currentHardwareCount < lastKnownHardwareCount) {
+            android.util.Log.i("StepCounter", "Device reboot detected. Resetting hardware baseline from $lastKnownHardwareCount to 0")
+            lastKnownHardwareCount = 0L // Reset baseline, keep dailySteps from database
         }
 
+        if (lastKnownHardwareCount >= 0) {
+            val stepIncrement = (currentHardwareCount - lastKnownHardwareCount).toInt()
+            if (stepIncrement in 1..10) { // Reasonable limit to avoid large jumps
+                val currentTime = System.currentTimeMillis()
+                repeat(stepIncrement) {
+                    registerStep(currentTime)
+                }
+            } else if (stepIncrement > 10) {
+                android.util.Log.w("StepCounter", "Large step increment ignored: $stepIncrement")
+            }
+        }
+
+        lastKnownHardwareCount = currentHardwareCount
+    }
+
+    /**
+     * Basic accelerometer-based step detection
+     */
+    private fun handleAccelerometerData(event: SensorEvent) {
         val x = event.values[0]
         val y = event.values[1]
         val z = event.values[2]
-        val magnitude = sqrt((x * x + y * y + z * z).toDouble())
 
-        val now = System.currentTimeMillis()
-        val timeSinceLastStep = now - lastStepTime
-        val magnitudeChange = magnitude - lastMagnitude
+        // Calculate magnitude
+        val magnitude = sqrt(x * x + y * y + z * z)
+        accelBuffer.add(magnitude)
 
-        val validationResult = performUltraStrictValidation(now, timeSinceLastStep)
-
-        if (magnitudeChange > stepThreshold &&
-            timeSinceLastStep > minStepInterval &&
-            magnitude > 8.0 &&
-            validationResult.isValid) {
-
-            currentSteps++
-            _stepsToday.value = currentSteps
-            lastStepTime = now
-            recentStepTimes.add(now)
-            if (recentStepTimes.size > maxRecentSteps) {
-                recentStepTimes.removeAt(0)
-            }
-
-            android.util.Log.d("StepCounter", "Accelerometer step: $currentSteps (magnitude: $magnitude)")
+        if (accelBuffer.size > BUFFER_SIZE) {
+            accelBuffer.removeAt(0)
         }
 
-        lastMagnitude = magnitude
-    }
+        if (accelBuffer.size >= 3) {
+            val current = accelBuffer.last()
+            val previous = accelBuffer[accelBuffer.size - 2]
+            val beforePrevious = accelBuffer[accelBuffer.size - 3]
+            val currentTime = System.currentTimeMillis()
 
-    data class ValidationResult(val isValid: Boolean, val reason: String)
+            // Simple peak detection
+            val isPeak = current > STEP_THRESHOLD &&
+                    current > previous &&
+                    previous > beforePrevious &&
+                    currentTime - lastStepTime >= MIN_STEP_INTERVAL
 
-    private fun performUltraStrictValidation(currentTime: Long, timeSinceLastStep: Long): ValidationResult {
-        val now = System.currentTimeMillis()
-
-        // 1. Device orientation - VERY strict
-        val gravityZ = abs(lastGravity[2])
-        val gravityMagnitude = sqrt((lastGravity[0] * lastGravity[0] +
-                lastGravity[1] * lastGravity[1] +
-                lastGravity[2] * lastGravity[2]).toDouble())
-
-        if (gravityMagnitude > 6.0 && gravityZ < 7.5 && lastGravityTime > 0) {
-            return ValidationResult(false, "Device not sufficiently vertical (gravityZ=$gravityZ)")
-        }
-
-        // 2. Device stability - much stricter
-        if (deviceVerticalStability > 0.8 && stabilityWindow.size >= 3) {
-            return ValidationResult(false, "Device too unstable (stability=$deviceVerticalStability)")
-        }
-
-        // 3. Rotation analysis - detect hand swinging
-        if (rotationWindow.isNotEmpty()) {
-            val avgRotation = rotationWindow.average()
-            if (avgRotation > 1.5) {
-                return ValidationResult(false, "Excessive rotation detected (rotation=$avgRotation)")
-            }
-        }
-
-        // 4. Vertical acceleration pattern
-        if (verticalAccelWindow.size >= 3) {
-            val verticalVariation = verticalAccelWindow.map { abs(it - verticalAccelWindow.average()) }.average()
-            if (verticalVariation < 0.5) {
-                return ValidationResult(false, "Unnatural vertical acceleration pattern")
-            }
-        }
-
-        // 5. Overall acceleration - much stricter
-        if (lastAccelTime > 0 && (now - lastAccelTime) < 1000) {
-            val totalAccel = sqrt((lastAcceleration[0] * lastAcceleration[0] +
-                    lastAcceleration[1] * lastAcceleration[1] +
-                    lastAcceleration[2] * lastAcceleration[2]).toDouble())
-
-            if (totalAccel > 15.0) { // Much lower threshold
-                return ValidationResult(false, "Excessive acceleration ($totalAccel)")
-            }
-
-            if (totalAccel < 8.5) { // Must have minimum movement
-                return ValidationResult(false, "Insufficient acceleration for walking ($totalAccel)")
-            }
-        }
-
-        // 6. Step interval pattern analysis - much stricter
-        if (recentStepTimes.size >= 4) {
-            val intervals = recentStepTimes.zipWithNext { a, b -> b - a }
-            val avgInterval = intervals.average()
-            val intervalVariation = intervals.map { abs(it - avgInterval) }.average()
-
-            // Natural walking has some variation
-            if (intervalVariation < 80 && avgInterval < 600) {
-                return ValidationResult(false, "Unnatural step rhythm (variation=$intervalVariation, avg=$avgInterval)")
-            }
-        }
-
-        // 7. Walking confidence check
-        if (walkingConfidence < 0.3 && recentStepTimes.size > 2) {
-            return ValidationResult(false, "Low walking confidence ($walkingConfidence)")
-        }
-
-        // 8. Stationary detection
-        val timeSinceMovement = now - lastSignificantMovement
-        if (timeSinceMovement > 3000 && stationaryTime > 5000) {
-            return ValidationResult(false, "Device appears stationary for too long")
-        }
-
-        // 9. Suspicious pattern detection
-        if (suspiciousPatternCount > 3) {
-            // Require longer intervals when suspicious
-            if (timeSinceLastStep < 500L) {
-                return ValidationResult(false, "Suspicious pattern - requiring longer intervals")
-            }
-        }
-
-        return ValidationResult(true, "All validations passed")
-    }
-
-    private fun updateDeviceStability() {
-        val gravityMagnitude = sqrt((lastGravity[0] * lastGravity[0] +
-                lastGravity[1] * lastGravity[1] +
-                lastGravity[2] * lastGravity[2]).toDouble())
-
-        stabilityWindow.add(gravityMagnitude)
-        if (stabilityWindow.size > 5) {
-            stabilityWindow.removeAt(0)
-        }
-
-        if (stabilityWindow.size >= 3) {
-            val variance = stabilityWindow.map { (it - stabilityWindow.average()).let { diff -> diff * diff } }.average()
-            deviceVerticalStability = variance
-        }
-    }
-
-    private fun updateRotationAnalysis() {
-        val rotationMagnitude = sqrt((lastGyroscope[0] * lastGyroscope[0] +
-                lastGyroscope[1] * lastGyroscope[1] +
-                lastGyroscope[2] * lastGyroscope[2]).toDouble())
-
-        rotationWindow.add(rotationMagnitude)
-        if (rotationWindow.size > 4) {
-            rotationWindow.removeAt(0)
-        }
-    }
-
-    private fun updateVerticalAccelAnalysis() {
-        // Project acceleration onto gravity vector for vertical component
-        val gravityMagnitude = sqrt((lastGravity[0] * lastGravity[0] +
-                lastGravity[1] * lastGravity[1] +
-                lastGravity[2] * lastGravity[2]).toDouble())
-
-        if (gravityMagnitude > 0) {
-            val dotProduct = (lastAcceleration[0] * lastGravity[0] +
-                    lastAcceleration[1] * lastGravity[1] +
-                    lastAcceleration[2] * lastGravity[2]).toDouble()
-            val verticalAccel = abs(dotProduct / gravityMagnitude)
-
-            verticalAccelWindow.add(verticalAccel)
-            if (verticalAccelWindow.size > 4) {
-                verticalAccelWindow.removeAt(0)
+            if (isPeak) {
+                registerStep(currentTime)
             }
         }
     }
 
-    private fun updateMovementDetection() {
-        val now = System.currentTimeMillis()
-        val totalAccel = sqrt((lastAcceleration[0] * lastAcceleration[0] +
-                lastAcceleration[1] * lastAcceleration[1] +
-                lastAcceleration[2] * lastAcceleration[2]).toDouble())
+    /**
+     * Register a validated step
+     */
+    private fun registerStep(timestamp: Long) {
+        dailySteps++
+        lastStepTime = timestamp
 
-        if (totalAccel > 11.0) { // Significant movement threshold
-            lastSignificantMovement = now
-            stationaryTime = 0
-            walkingConfidence = minOf(1.0, walkingConfidence + 0.1)
-        } else {
-            stationaryTime = now - lastSignificantMovement
-            if (stationaryTime > 2000) {
-                walkingConfidence = maxOf(0.0, walkingConfidence - 0.1)
-            }
+        handler.post {
+            _stepsToday.value = dailySteps
         }
+
+        android.util.Log.d("StepCounter", "Registered step #$dailySteps at $timestamp")
     }
 
-    private fun handleDateChange(newDate: LocalDate) {
-        android.util.Log.d("StepCounter", "Date changed from $currentDate to $newDate")
-        currentDate = newDate
-        currentSteps = 0
-        resetValidationVariables()
-        _stepsToday.value = 0
+    /**
+     * Check for date changes and reset daily count
+     */
+    private fun checkDateRollover() {
+        val today = LocalDate.now()
+        if (today != currentDate) {
+            android.util.Log.i("StepCounter", "Date rollover: $currentDate -> $today")
+            currentDate = today
+            dailySteps = 0 // Will be reinitialized by service on next start
+            lastStepTime = 0L
+            accelBuffer.clear()
+            lastKnownHardwareCount = 0L // Reset hardware count for new day
+            _stepsToday.value = 0
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
         android.util.Log.d("StepCounter", "Sensor accuracy changed: ${sensor?.name} = $accuracy")
     }
 
-    fun getSensorInfo(): String {
-        val sb = StringBuilder()
-        sb.append("=== ULTRA-STRICT Step Counter ===\n")
-        sb.append("Step Detector: ${stepDetectorSensor != null}\n")
-        sb.append("Accelerometer: ${accelerometer != null}\n")
-        sb.append("Gravity Sensor: ${gravitySensor != null}\n")
-        sb.append("Gyroscope: ${gyroscope != null}\n")
-        sb.append("\nUsing Step Detector: $usingStepDetector\n")
-        sb.append("Steps Today: $currentSteps\n")
-        sb.append("Walking Confidence: ${"%.2f".format(walkingConfidence)}\n")
-        sb.append("Suspicious Patterns: $suspiciousPatternCount\n")
-        sb.append("Device Stability: ${"%.3f".format(deviceVerticalStability)}\n")
-        sb.append("Stationary Time: ${stationaryTime}ms\n")
-        sb.append("Gravity Vector: ${lastGravity.joinToString { "%.2f".format(it) }}\n")
-        return sb.toString()
+    /**
+     * Stop tracking and cleanup
+     */
+    fun stopTracking() {
+        if (!isActive) return
+
+        isActive = false
+        sensorManager.unregisterListener(this)
+        _isTracking.value = false
+
+        android.util.Log.i("StepCounter", "Tracking stopped. Final count: $dailySteps")
     }
 
-    fun isUsingHardwareSensors(): Boolean = usingStepDetector
+    // Public API
+    fun getCurrentSteps(): Int = dailySteps
+    fun getSessionSteps(): Int = dailySteps - sessionStartSteps
 
-    fun getCurrentDetectionMethod(): String {
-        return when {
-            usingStepDetector -> "Ultra-Strict Hardware Step Detector"
-            usingAccelerometer -> "Ultra-Strict Accelerometer"
-            else -> "No sensors available"
+    fun getDetectionInfo(): String {
+        return buildString {
+            appendLine("=== Step Detection Info ===")
+            appendLine("Steps Today: $dailySteps")
+            appendLine("Session Steps: ${getSessionSteps()}")
+            appendLine("Is Tracking: $isActive")
+            appendLine("Current Date: $currentDate")
+            appendLine("Last Hardware Count: $lastKnownHardwareCount")
+            appendLine()
+            appendLine("Available Sensors:")
+            appendLine("• Step Detector: ${stepDetectorSensor != null}")
+            appendLine("• Step Counter: ${stepCounterSensor != null}")
+            appendLine("• Accelerometer: ${accelerometer != null}")
+            appendLine()
+            appendLine("Last Step Time: ${if (lastStepTime > 0) "${System.currentTimeMillis() - lastStepTime}ms ago" else "N/A"}")
         }
     }
 
-    fun resetSteps() {
-        currentSteps = 0
-        resetValidationVariables()
+    fun resetDailySteps() {
+        dailySteps = 0
+        sessionStartSteps = 0
+        accelBuffer.clear()
+        lastKnownHardwareCount = 0L
         _stepsToday.value = 0
-        android.util.Log.d("StepCounter", "Steps manually reset")
-    }
-
-    fun addSteps(steps: Int) {
-        currentSteps += steps
-        _stepsToday.value = currentSteps
-        android.util.Log.d("StepCounter", "Added $steps steps manually. Total: $currentSteps")
+        android.util.Log.i("StepCounter", "Daily steps reset manually")
     }
 }
